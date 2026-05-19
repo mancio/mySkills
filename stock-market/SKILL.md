@@ -7,9 +7,19 @@ description: Build from zero a Python app that generates a static HTML report li
 
 ## Goal
 
-Produce `report.html` containing a single sortable table of every S&P 500 (US) **and** STOXX Europe 600 (EU) constituent that is currently within a configurable distance of a computed support level. Rows sorted ascending by last close (cheapest → most expensive). Columns:
+Produce a **single** `report.html` containing one sortable table of every S&P 500 (US) **and** STOXX Europe 600 (EU) constituent that:
 
-| Ticker | Name | Exchange | Last Close | Support | Distance % | Analyst Rating | # Analysts | Updated |
+1. is currently within a configurable distance of a computed support level, **and**
+2. has a consensus analyst rating of **Buy** or **Strong Buy** (other ratings are dropped).
+
+Rows sorted ascending by last close (cheapest → most expensive). Columns (exact order):
+
+| Ticker | Name | Market | Last | Support | Dist % | 52w High | Drawdown | Days since high | Rating | # Analysts |
+
+- **Market** = `US` or `EU`.
+- **Drawdown** = `(52w high − last close) / 52w high × 100`, rendered as a negative percent.
+- **Days since high** = trading-day distance from the bar of the 52w high to the last bar.
+- **Rating** must be only `Buy` or `Strong Buy` — anything else excludes the row entirely.
 
 No mock data. If a required secret is missing, **stop and ask the user** to provide it.
 
@@ -80,9 +90,11 @@ From the latest Finnhub recommendation row, pick the bucket with the highest cou
    - load universe (US + EU concatenated)
    - batch-download prices via `yfinance.download(tickers, period="1y", group_by="ticker", auto_adjust=False, threads=True)`
    - for each ticker compute support; keep only "near support"
+   - compute 52w high, drawdown %, and days-since-high from the same history (no extra fetch)
    - fetch ratings for the survivors only (minimises API calls)
+   - **drop every row whose rating is not `Buy` or `Strong Buy`**
    - sort ascending by last close
-   - render HTML
+   - render the single `report.html`
 6. Print final summary: `"Wrote report.html with N rows (X US, Y EU)"`.
 
 ## HTML template requirements
@@ -103,4 +115,51 @@ From the latest Finnhub recommendation row, pick the bucket with the highest cou
 
 ## Done = 
 
-Running `python -m src.main` from a clean checkout (after `pip install -r requirements.txt` and a populated `.env`) produces a non-empty `report.html` whose first row is the cheapest qualifying stock and whose rating column is populated for every row.
+Running `python -m src.main` from a clean checkout (after `pip install -r requirements.txt` and a populated `.env`) produces a non-empty `report.html` whose first row is the cheapest qualifying stock, whose **Rating** column contains only `Buy` or `Strong Buy`, and whose **Drawdown** / **52w High** / **Days since high** columns are populated for every row.
+
+## Optional follow-up: extra drawdown filter (`src/fallen_near_support.py`)
+
+The drawdown columns are already in `report.html`. An auxiliary module exists
+to produce a **secondary, narrower** HTML (`report_fallen.html`) that keeps
+only rows with `drawdown% >= --min-drawdown` (default `25.0`) — useful when
+the user wants "fallen + near support" pullback candidates only.
+
+$$\text{drawdown\%} = \frac{\text{52w high} - \text{last close}}{\text{52w high}} \times 100$$
+
+### Module
+
+```
+src/fallen_near_support.py
+```
+
+- Parses `report.html` (regex-strips `<tr>/<td>` cells; tolerates the inner
+  `<span class="pill ...">` / `<span class="rating ...">` wrappers).
+- Re-uses `src.prices.download_history` to recompute the 52w high — no
+  separate data source, no new API key.
+- Writes `report_fallen.html` with the **same column set** as `report.html`,
+  sorted by drawdown descending.
+
+### CLI
+
+```powershell
+# default: ≥25% off 52w high
+python -m src.fallen_near_support
+
+# stricter (deep crashes only)
+python -m src.fallen_near_support --min-drawdown 40
+
+# any pullback ≥15%
+python -m src.fallen_near_support --min-drawdown 15
+
+# top N most-drawn-down
+python -m src.fallen_near_support --min-drawdown 25 --top 20
+```
+
+### Hard rules
+
+- No new data source — must reuse `download_history`.
+- Never fabricate the 52w high; if history is missing for a ticker, drop it.
+- Drawdown is computed from raw (not adjusted) `High` to match the support
+  algorithm; if `auto_adjust` is ever flipped on, update this module in sync.
+- Output is sorted by drawdown desc; ties broken by ticker asc.
+
